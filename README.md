@@ -1,15 +1,16 @@
 # NutrAI - Duke Nutrition Database & Scraper
 
-A comprehensive system for scraping, storing, and querying nutrition data from Duke University's dining services. This system provides automated daily scraping, a robust SQLite database, and a powerful query API.
+A comprehensive system for scraping, storing, and querying nutrition data from Duke University's dining services. This system provides automated daily scraping with a **complete refresh approach** - each scrape wipes the database and inserts fresh data, ensuring you always have the most current information from NetNutrition.
 
 ## 🚀 Features
 
-- **Automated Scraping**: Daily scheduled scraping of Duke's nutrition data
-- **SQLite Database**: Efficient storage with historical tracking
+- **Automated Daily Refresh**: Complete database refresh daily with latest nutrition data
+- **SQLite Database**: Efficient storage with simple refresh approach
 - **Query API**: Powerful search and filtering capabilities
 - **Meal Planning**: Nutritional summaries for multiple items
 - **Health-focused Queries**: Find healthy options, high-protein foods, allergen-free items
 - **CLI Interface**: Easy command-line access to all features
+- **Scraping Logs**: Track scraping history and performance
 
 ## 📁 Project Structure
 
@@ -17,7 +18,7 @@ A comprehensive system for scraping, storing, and querying nutrition data from D
 nutrAI/
 ├── scraper.py              # Original web scraper
 ├── database.py             # Database management & schema
-├── scheduler.py            # Automated daily scraping
+├── scheduler.py            # Automated daily scraping with refresh
 ├── query_api.py           # Query interface & CLI
 ├── setup_database.py      # Initial setup script
 ├── requirements.txt       # Python dependencies
@@ -25,6 +26,22 @@ nutrAI/
 ├── scraping.log          # Scraping activity logs
 └── duke_nutrition_data_*.csv  # CSV exports (existing)
 ```
+
+## 🔄 Database Approach
+
+This system uses a **complete refresh approach** for simplicity and data integrity:
+
+- **Daily Refresh**: Each scraping session completely clears the database and inserts fresh data
+- **No Incremental Updates**: No complex logic for detecting changes or handling updates
+- **Always Current**: Database always reflects the exact current state of NetNutrition
+- **Simplified Logic**: Eliminates issues with stale data, duplicate detection, etc.
+
+This approach is perfect for nutrition data since:
+
+- Menu items change frequently
+- Nutritional information can be updated
+- Complete refresh ensures data consistency
+- Scraping runs once daily, so performance is not a concern
 
 ## 🛠️ Setup
 
@@ -43,14 +60,14 @@ python setup_database.py
 This will:
 
 - Create the SQLite database with proper schema
-- Import your existing CSV data
+- Import your existing CSV data (initial import)
 - Show database statistics
 - Display next steps
 
 ### 3. Test the System
 
 ```bash
-# Run scraping once to test
+# Run scraping once to test (this will refresh all data)
 python scheduler.py --run-once
 
 # Search for items
@@ -60,22 +77,30 @@ python query_api.py search "chicken"
 python query_api.py restaurants
 ```
 
-## 📅 Daily Scraping
+## 📅 Daily Scraping with Complete Refresh
 
 ### Set up automated daily scraping:
 
 ```bash
-# Schedule daily scraping at 6:00 AM
+# Schedule daily scraping at 6:00 AM (complete refresh)
 python scheduler.py --schedule daily --time 06:00
 ```
+
+**What happens during each scrape:**
+
+1. Start scraping session
+2. Scrape all current data from NetNutrition
+3. **Clear all existing data** from database
+4. **Insert fresh data** from scrape
+5. Log the session with item counts
 
 ### Other scheduling options:
 
 ```bash
-# Hourly scraping (for testing)
+# Hourly scraping (for testing) - full refresh each time
 python scheduler.py --schedule hourly
 
-# Weekly scraping (Mondays at 6 AM)
+# Weekly scraping (Mondays at 6 AM) - full refresh
 python scheduler.py --schedule weekly --day monday --time 06:00
 
 # Run as daemon (background service)
@@ -159,56 +184,65 @@ print(f"Meal total: {meal_summary['total_calories']} calories")
 ### Tables
 
 1. **food_items**: Basic food item information
-2. **nutrition_facts**: Nutritional data (with history)
-3. **ingredients**: Ingredient lists and allergens (with history)
-4. **scraping_log**: Scraping session tracking
+2. **nutrition_facts**: Nutritional data (refreshed daily)
+3. **ingredients**: Ingredient lists and allergens (refreshed daily)
+4. **scraping_log**: Scraping session tracking (preserved across refreshes)
 
 ### Key Features
 
-- **Historical tracking**: Nutrition facts and ingredients are versioned
-- **Efficient querying**: Proper indexes for fast searches
-- **Data integrity**: Foreign key constraints and validation
-- **Logging**: Complete audit trail of scraping activities
+- **Complete Refresh**: All food data is wiped and refreshed daily
+- **Efficient Querying**: Proper indexes for fast searches
+- **Data Integrity**: Foreign key constraints and validation
+- **Scraping History**: Complete audit trail of refresh sessions (preserved)
+- **Simple Schema**: No versioning complexity since data is refreshed completely
 
-## 📊 Example Queries
+## 📊 Monitoring Your Refreshes
 
-### Find the healthiest breakfast options:
-
-```python
-from query_api import NutritionAPI
-api = NutritionAPI()
-
-# Get Cafe breakfast items under 300 calories
-healthy_breakfast = api.find_healthy_options(max_calories=300)
-breakfast_items = [item for item in healthy_breakfast
-                  if item['category'] == 'Breakfast']
-
-for item in breakfast_items[:5]:
-    print(f"{item['item_name']}: {item['calories']} cal")
-```
-
-### Plan a high-protein meal:
+### View scraping history:
 
 ```python
-# Find high protein items
-protein_items = api.find_high_protein(min_protein=20)
+from database import NutritionDatabase
 
-# Select a few items for a meal
-meal_ids = [item['item_id'] for item in protein_items[:3]]
-meal_summary = api.get_nutritional_summary(meal_ids)
+db = NutritionDatabase()
+history = db.get_scraping_history(10)
 
-print(f"Meal: {meal_summary['total_calories']} calories, {meal_summary['total_protein']} protein")
+for entry in history:
+    print(f"{entry['started_at']}: {entry['status']} - "
+          f"{entry['items_added']} items refreshed")
 ```
 
-### Find allergen-safe options:
+### Database statistics:
 
 ```python
-# Find items safe for someone with dairy and nut allergies
-safe_items = api.find_by_allergens(['milk', 'dairy', 'nuts', 'peanuts'])
-print(f"Found {len(safe_items)} safe options")
+stats = db.get_stats()
+print(f"Total items: {stats['total_items']}")
+print(f"Last refreshed: {stats['last_scraped']}")
 ```
+
+**Note**: In refresh mode, `items_added` represents the total number of items in the refreshed database, and `items_updated` is always 0.
 
 ## 🔧 Advanced Configuration
+
+### Manual Database Refresh
+
+You can manually refresh the database with new data:
+
+```python
+from database import NutritionDatabase
+
+db = NutritionDatabase()
+
+# Clear all data and insert fresh data
+items_inserted = db.refresh_all_data(new_food_data)
+print(f"Database refreshed with {items_inserted} items")
+```
+
+### Clear Database Only
+
+```python
+# Clear all food data (but keep scraping logs)
+db.clear_food_data()
+```
 
 ### Database Path
 
@@ -266,11 +300,12 @@ print(f"Last updated: {stats['last_updated']}")
 
 ## 🚀 Next Steps
 
-1. **Set up daily scraping** for automated data updates
-2. **Build a web interface** using Flask/FastAPI
-3. **Add more restaurants** by extending the scraper
-4. **Implement recommendations** based on dietary preferences
-5. **Add nutrition analysis** and meal optimization features
+1. **Set up daily scraping** for automated data refresh
+2. **Monitor scraping logs** to ensure reliable daily updates
+3. **Build a web interface** using Flask/FastAPI
+4. **Add more restaurants** by extending the scraper
+5. **Implement recommendations** based on dietary preferences
+6. **Add nutrition analysis** and meal optimization features
 
 ## 🔍 Troubleshooting
 
@@ -279,20 +314,26 @@ print(f"Last updated: {stats['last_updated']}")
 1. **Import errors**: Make sure all dependencies are installed
 2. **Database locked**: Only one process can write to SQLite at a time
 3. **Scraping failures**: Check your internet connection and Duke's website availability
-4. **Missing data**: Run the setup script to import existing CSV data
+4. **Missing data after refresh**: Check scraping logs for errors
 
 ### Logs
 
-Check `scraping.log` for detailed scraping activity and error messages.
+Check `scraping.log` for detailed scraping activity and error messages. Each refresh operation is logged with:
+
+- Start/completion times
+- Number of items found and inserted
+- Any errors encountered
 
 ### Reset Database
 
-To start fresh:
+To start completely fresh:
 
 ```bash
 rm nutrition_data.db
 python setup_database.py
 ```
+
+This will recreate the database and import your existing CSV data.
 
 ---
 

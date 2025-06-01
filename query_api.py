@@ -29,17 +29,21 @@ class NutritionAPI:
         """Get all available restaurants/units."""
         return self.db.get_units()
     
-    def get_menu_by_restaurant(self, unit_id: str, category: Optional[str] = None) -> List[Dict]:
+    def get_menu_by_restaurant(self, unit_id: str, category: Optional[str] = None, subcategory: Optional[str] = None) -> List[Dict]:
         """Get menu items for a specific restaurant."""
-        return self.db.get_all_items(unit_id=unit_id, category=category)
+        return self.db.get_all_items(unit_id=unit_id, category=category, subcategory=subcategory)
     
     def get_categories(self, unit_id: Optional[str] = None) -> List[str]:
         """Get all available food categories."""
         return self.db.get_categories(unit_id=unit_id)
     
-    def find_healthy_options(self, max_calories: int = 400, unit_id: Optional[str] = None) -> List[Dict]:
+    def get_subcategories(self, unit_id: Optional[str] = None, category: Optional[str] = None) -> List[str]:
+        """Get all available food subcategories."""
+        return self.db.get_subcategories(unit_id=unit_id, category=category)
+    
+    def find_healthy_options(self, max_calories: int = 400, unit_id: Optional[str] = None, subcategory: Optional[str] = None) -> List[Dict]:
         """Find food items under specified calorie limit."""
-        items = self.db.get_all_items(unit_id=unit_id)
+        items = self.db.get_all_items(unit_id=unit_id, subcategory=subcategory)
         healthy_items = []
         
         for item in items:
@@ -49,9 +53,9 @@ class NutritionAPI:
         # Sort by calories (ascending)
         return sorted(healthy_items, key=lambda x: x['calories'] or 0)
     
-    def find_high_protein(self, min_protein: int = 20, unit_id: Optional[str] = None) -> List[Dict]:
+    def find_high_protein(self, min_protein: int = 20, unit_id: Optional[str] = None, subcategory: Optional[str] = None) -> List[Dict]:
         """Find food items with high protein content."""
-        items = self.db.get_all_items(unit_id=unit_id)
+        items = self.db.get_all_items(unit_id=unit_id, subcategory=subcategory)
         high_protein_items = []
         
         for item in items:
@@ -69,9 +73,9 @@ class NutritionAPI:
         # Sort by protein content (descending)
         return sorted(high_protein_items, key=lambda x: x.get('protein_value', 0), reverse=True)
     
-    def find_by_allergens(self, avoid_allergens: List[str], unit_id: Optional[str] = None) -> List[Dict]:
+    def find_by_allergens(self, avoid_allergens: List[str], unit_id: Optional[str] = None, subcategory: Optional[str] = None) -> List[Dict]:
         """Find food items that don't contain specified allergens."""
-        items = self.db.get_all_items(unit_id=unit_id)
+        items = self.db.get_all_items(unit_id=unit_id, subcategory=subcategory)
         safe_items = []
         
         for item in items:
@@ -169,21 +173,30 @@ def main():
     menu_parser = subparsers.add_parser('menu', help='Get menu for restaurant')
     menu_parser.add_argument('restaurant_id', help='Restaurant ID')
     menu_parser.add_argument('--category', help='Filter by category')
+    menu_parser.add_argument('--subcategory', help='Filter by subcategory')
+    
+    # Subcategories command
+    subcat_parser = subparsers.add_parser('subcategories', help='List subcategories')
+    subcat_parser.add_argument('--restaurant', help='Filter by restaurant ID')
+    subcat_parser.add_argument('--category', help='Filter by category')
     
     # Healthy options command
     healthy_parser = subparsers.add_parser('healthy', help='Find healthy options')
     healthy_parser.add_argument('--max-calories', type=int, default=400, help='Maximum calories')
     healthy_parser.add_argument('--restaurant', help='Filter by restaurant ID')
+    healthy_parser.add_argument('--subcategory', help='Filter by subcategory')
     
     # High protein command
     protein_parser = subparsers.add_parser('protein', help='Find high protein options')
     protein_parser.add_argument('--min-protein', type=int, default=20, help='Minimum protein (g)')
     protein_parser.add_argument('--restaurant', help='Filter by restaurant ID')
+    protein_parser.add_argument('--subcategory', help='Filter by subcategory')
     
     # Allergen-free command
     allergen_parser = subparsers.add_parser('allergen-free', help='Find allergen-free options')
     allergen_parser.add_argument('allergens', nargs='+', help='Allergens to avoid')
     allergen_parser.add_argument('--restaurant', help='Filter by restaurant ID')
+    allergen_parser.add_argument('--subcategory', help='Filter by subcategory')
     
     # Meal planning command
     meal_parser = subparsers.add_parser('meal', help='Plan a meal with multiple items')
@@ -213,26 +226,37 @@ def main():
             for rest in restaurants:
                 print(f"  {rest['unit_name']} (ID: {rest['unit_id']}) - {rest['item_count']} items")
         
+        elif args.command == 'subcategories':
+            subcategories = api.get_subcategories(args.restaurant, args.category)
+            filter_desc = ""
+            if args.restaurant:
+                filter_desc += f" for restaurant {args.restaurant}"
+            if args.category:
+                filter_desc += f" in category '{args.category}'"
+            print(f"Available subcategories{filter_desc}:")
+            for subcat in subcategories:
+                print(f"  {subcat}")
+        
         elif args.command == 'menu':
-            menu = api.get_menu_by_restaurant(args.restaurant_id, args.category)
+            menu = api.get_menu_by_restaurant(args.restaurant_id, args.category, args.subcategory)
             print(f"Menu items: {len(menu)}")
             for item in menu[:20]:  # Show first 20 items
                 print(f"  {item['item_name']} - {item['calories']} cal")
         
         elif args.command == 'healthy':
-            healthy = api.find_healthy_options(args.max_calories, args.restaurant)
+            healthy = api.find_healthy_options(args.max_calories, args.restaurant, args.subcategory)
             print(f"Found {len(healthy)} healthy options (≤{args.max_calories} cal):")
             for item in healthy[:10]:
                 print(f"  {item['item_name']} - {item['calories']} cal ({item['unit_name']})")
         
         elif args.command == 'protein':
-            high_protein = api.find_high_protein(args.min_protein, args.restaurant)
+            high_protein = api.find_high_protein(args.min_protein, args.restaurant, args.subcategory)
             print(f"Found {len(high_protein)} high protein options (≥{args.min_protein}g):")
             for item in high_protein[:10]:
                 print(f"  {item['item_name']} - {item['protein']} protein ({item['unit_name']})")
         
         elif args.command == 'allergen-free':
-            safe_items = api.find_by_allergens(args.allergens, args.restaurant)
+            safe_items = api.find_by_allergens(args.allergens, args.restaurant, args.subcategory)
             print(f"Found {len(safe_items)} items avoiding {', '.join(args.allergens)}:")
             for item in safe_items[:10]:
                 print(f"  {item['item_name']} ({item['unit_name']})")

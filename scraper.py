@@ -50,7 +50,7 @@ def setup_session():
     session.cookies.set('CBORD.netnutrition2', 'NNexternalID=duke', domain='netnutrition.cbord.com')
     
     print("Session setup complete")
-    return session.cookies.get_dict()
+    return session
 
 def get_units():
     """Get list of all restaurants/units from the main page"""
@@ -275,52 +275,181 @@ def select_unit_and_get_menu(unit_id):
         return []
 
 def extract_menu_items_from_html(html_content, unit_id, category_name=None):
-    """Extract menu items from HTML content"""
+    """Extract menu items from HTML content with improved subcategory association"""
     menu_items = []
     soup = BeautifulSoup(html_content, 'lxml')
     
-    # Look for menu items with data-item-oid attributes
-    item_elements = soup.find_all(attrs={'data-item-oid': True})
-    
-    if item_elements:
-        print(f"    Using data-item-oid attributes...")
-        for elem in item_elements:
-            item_id = elem.get('data-item-oid')
-            item_name = elem.text.strip() if elem.text else f"Item {item_id}"
-            
-            # Clean up item name
-            item_name = ' '.join(item_name.split())  # Remove extra whitespace
-            
-            menu_items.append({
-                "id": item_id,
-                "name": item_name,
-                "unit_id": unit_id,
-                "category": category_name
-            })
-    else:
-        # Parse onclick handlers for nutrition items
-        print(f"    No data-item-oid found, parsing onclick handlers...")
-        clickable_items = soup.find_all(attrs={'onclick': True})
-        for elem in clickable_items:
-            onclick = elem.get('onclick', '')
+    # Get all food items using both methods
+    def get_all_food_items(container_soup):
+        """Helper to get all food items from a container using both methods"""
+        items = []
+        
+        # Method 1: data-item-oid
+        data_items = container_soup.find_all(attrs={'data-item-oid': True})
+        for item in data_items:
+            item_id = item.get('data-item-oid')
+            item_name = item.text.strip()
+            if item_id and item_name and len(item_name) > 2:
+                items.append({
+                    'id': item_id,
+                    'name': ' '.join(item_name.split()),
+                    'element': item,
+                    'method': 'data-attr'
+                })
+        
+        # Method 2: onclick nutrition handlers
+        onclick_items = container_soup.find_all(attrs={'onclick': True})
+        for item in onclick_items:
+            onclick = item.get('onclick', '')
             if 'getItemNutritionLabelOnClick' in onclick:
-                # Extract item ID from onclick like: NetNutrition.UI.getItemNutritionLabelOnClick(event,243788323)
                 import re
                 match = re.search(r'getItemNutritionLabelOnClick\(event,(\d+)\)', onclick)
                 if match:
                     item_id = match.group(1)
-                    item_name = elem.text.strip() if elem.text else f"Item {item_id}"
-                    
-                    # Clean up item name
-                    item_name = ' '.join(item_name.split())  # Remove extra whitespace
-                    
-                    if item_name and len(item_name) > 2:  # Valid name
-                        menu_items.append({
-                            "id": item_id,
-                            "name": item_name,
-                            "unit_id": unit_id,
-                            "category": category_name
+                    item_name = item.text.strip()
+                    if item_name and len(item_name) > 2:
+                        items.append({
+                            'id': item_id,
+                            'name': ' '.join(item_name.split()),
+                            'element': item,
+                            'method': 'onclick'
                         })
+        
+        return items
+    
+    # Find all subcategory toggles
+    subcategory_elements = []
+    clickable_elements = soup.find_all(attrs={'onclick': True})
+    
+    for elem in clickable_elements:
+        onclick = elem.get('onclick', '')
+        if 'toggleCourseItems' in onclick:
+            import re
+            match = re.search(r'toggleCourseItems\(this,\s*(\d+)\)', onclick)
+            if match:
+                course_id = match.group(1)
+                subcategory_name = elem.text.strip()
+                subcategory_elements.append({
+                    'course_id': course_id,
+                    'name': subcategory_name,
+                    'element': elem
+                })
+    
+    print(f"    Found {len(subcategory_elements)} subcategories in HTML")
+    
+    # Associate items with subcategories
+    assigned_items = set()
+    
+    for subcat in subcategory_elements:
+        course_id = subcat['course_id']
+        subcat_name = subcat['name']
+        subcat_elem = subcat['element']
+        
+        associated_items = []
+        
+        # Approach 1: Look for containers with course ID
+        course_containers = soup.find_all('div', attrs={'id': lambda x: x and course_id in str(x)})
+        if not course_containers:
+            course_containers = soup.find_all('div', class_=lambda x: x and course_id in str(x))
+        if not course_containers:
+            # Also check for other tags
+            course_containers = soup.find_all(attrs={'id': lambda x: x and course_id in str(x)})
+        
+        for container in course_containers:
+            container_items = get_all_food_items(container)
+            for item_data in container_items:
+                if item_data['id'] not in assigned_items:
+                    associated_items.append({
+                        "id": item_data['id'],
+                        "name": item_data['name'],
+                        "unit_id": unit_id,
+                        "category": category_name,
+                        "subcategory": subcat_name
+                    })
+                    assigned_items.add(item_data['id'])
+        
+        # Approach 2: Look for items positioned after subcategory in DOM structure
+        if not associated_items:
+            parent = subcat_elem.parent
+            if parent:
+                # Try broader search - look at grandparent too
+                search_containers = [parent]
+                if parent.parent:
+                    search_containers.append(parent.parent)
+                
+                for search_container in search_containers:
+                    # Get all elements in order
+                    all_elements = search_container.find_all(True)
+                    
+                    # Find subcategory position
+                    subcat_position = None
+                    for i, elem in enumerate(all_elements):
+                        if elem == subcat_elem:
+                            subcat_position = i
+                            break
+                    
+                    if subcat_position is not None:
+                        # Find the next subcategory position to limit scope
+                        next_subcat_position = len(all_elements)
+                        for other_subcat in subcategory_elements:
+                            if other_subcat['course_id'] != course_id:
+                                for i, elem in enumerate(all_elements):
+                                    if elem == other_subcat['element'] and i > subcat_position:
+                                        next_subcat_position = min(next_subcat_position, i)
+                        
+                        # Collect items between current and next subcategory
+                        for i in range(subcat_position + 1, next_subcat_position):
+                            elem = all_elements[i]
+                            
+                            # Check if this element is a food item
+                            item_id = elem.get('data-item-oid')
+                            if not item_id:
+                                onclick = elem.get('onclick', '')
+                                if 'getItemNutritionLabelOnClick' in onclick:
+                                    import re
+                                    match = re.search(r'getItemNutritionLabelOnClick\(event,(\d+)\)', onclick)
+                                    if match:
+                                        item_id = match.group(1)
+                            
+                            if item_id and item_id not in assigned_items:
+                                item_name = elem.text.strip()
+                                if item_name and len(item_name) > 2:
+                                    associated_items.append({
+                                        "id": item_id,
+                                        "name": ' '.join(item_name.split()),
+                                        "unit_id": unit_id,
+                                        "category": category_name,
+                                        "subcategory": subcat_name
+                                    })
+                                    assigned_items.add(item_id)
+                    
+                    if associated_items:
+                        break  # Found items, don't need to search grandparent
+        
+        if associated_items:
+            menu_items.extend(associated_items)
+            print(f"      • {subcat_name}: {len(associated_items)} items")
+    
+    # Handle unassigned items
+    all_items = get_all_food_items(soup)
+    unassigned_count = 0
+    
+    for item_data in all_items:
+        if item_data['id'] not in assigned_items:
+            menu_items.append({
+                "id": item_data['id'],
+                "name": item_data['name'],
+                "unit_id": unit_id,
+                "category": category_name,
+                "subcategory": None
+            })
+            unassigned_count += 1
+    
+    if unassigned_count > 0:
+        print(f"      • (No subcategory): {unassigned_count} items")
+    
+    total_assigned = len(assigned_items)
+    print(f"    Total: {len(menu_items)} items ({total_assigned} with subcategories, {unassigned_count} without)")
     
     return menu_items
 
@@ -464,7 +593,7 @@ def scrape_all_nutrition_data():
     csv_filename = f"duke_nutrition_data_{timestamp}.csv"
     
     fieldnames = [
-        "item_id", "item_name", "unit_id", "unit_name", "category", "serving_size", 
+        "item_id", "item_name", "unit_id", "unit_name", "category", "subcategory", "serving_size", 
         "calories", "total_fat", "saturated_fat", "trans_fat", "cholesterol", 
         "sodium", "total_carb", "dietary_fiber", "sugars", "protein", 
         "ingredients", "allergens", "scraped_at"
@@ -491,8 +620,11 @@ def scrape_all_nutrition_data():
             item_id = item["id"]
             item_name = item["name"]
             item_category = item.get("category", "")
+            item_subcategory = item.get("subcategory", "")
             
             print(f"  [{i}/{len(menu_items)}] Getting nutrition for: {item_name}")
+            if item_subcategory:
+                print(f"    Subcategory: {item_subcategory}")
             
             # Prepare menu context for nutrition request
             menu_context = {
@@ -504,6 +636,7 @@ def scrape_all_nutrition_data():
             if nutrition_data:
                 nutrition_data["unit_name"] = unit_name
                 nutrition_data["category"] = item_category
+                nutrition_data["subcategory"] = item_subcategory
                 nutrition_data["scraped_at"] = datetime.now().isoformat()
                 all_nutrition_data.append(nutrition_data)
                 total_items += 1

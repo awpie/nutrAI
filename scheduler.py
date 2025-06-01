@@ -42,13 +42,14 @@ class NutritionScrapeScheduler:
     def scrape_and_store(self) -> bool:
         """
         Run a complete scraping session and store results in database.
+        Uses the refresh approach: clears all data and inserts fresh data.
         Returns True if successful, False otherwise.
         """
         started_at = datetime.now(timezone.utc)
         log_id = None
         
         try:
-            logger.info("Starting scheduled nutrition data scraping...")
+            logger.info("Starting scheduled nutrition data scraping (full refresh)...")
             
             # Log the start of scraping session
             log_id = self.db.log_scraping_session(
@@ -73,25 +74,25 @@ class NutritionScrapeScheduler:
                     )
                 return False
             
-            # Store data in database
-            items_added, items_updated = self.db.insert_food_data(nutrition_data)
+            # Refresh all data in database (clear + insert)
+            logger.info("Refreshing database with new data (clearing old data)...")
+            items_inserted = self.db.refresh_all_data(nutrition_data)
             completed_at = datetime.now(timezone.utc)
             
-            # Update the scraping log
+            # Update the scraping log (all items are "added" since we refresh everything)
             if log_id:
                 self.db.update_scraping_session(
                     log_id=log_id,
                     completed_at=completed_at,
                     items_found=len(nutrition_data),
-                    items_added=items_added,
-                    items_updated=items_updated,
+                    items_added=items_inserted,
+                    items_updated=0,  # No updates in refresh mode
                     status='completed'
                 )
             
             logger.info(f"Scraping completed successfully!")
             logger.info(f"Items found: {len(nutrition_data)}")
-            logger.info(f"Items added: {items_added}")
-            logger.info(f"Items updated: {items_updated}")
+            logger.info(f"Items inserted (after full refresh): {items_inserted}")
             logger.info(f"Duration: {(completed_at - started_at).total_seconds():.2f} seconds")
             
             return True

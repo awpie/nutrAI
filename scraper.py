@@ -5,9 +5,22 @@ import csv
 import time
 from datetime import datetime
 import os
+import signal
+import sys
 
 BASE_URL = "https://netnutrition.cbord.com/nn-prod/Duke"
 session = requests.Session()
+
+# Global variables for graceful shutdown
+all_nutrition_data = []
+csv_filename = ""
+fieldnames = []
+
+def clean_text(text):
+    """Clean text by removing accented characters and extra whitespace"""
+    if not text:
+        return ""
+    return text.replace('Â', '').replace('\xa0', ' ').strip()
 
 # Headers for main page (regular navigation)
 main_headers = {
@@ -288,7 +301,7 @@ def extract_menu_items_from_html(html_content, unit_id, category_name=None):
         data_items = container_soup.find_all(attrs={'data-item-oid': True})
         for item in data_items:
             item_id = item.get('data-item-oid')
-            item_name = item.text.strip()
+            item_name = clean_text(item.text)
             if item_id and item_name and len(item_name) > 2:
                 items.append({
                     'id': item_id,
@@ -306,7 +319,7 @@ def extract_menu_items_from_html(html_content, unit_id, category_name=None):
                 match = re.search(r'getItemNutritionLabelOnClick\(event,(\d+)\)', onclick)
                 if match:
                     item_id = match.group(1)
-                    item_name = item.text.strip()
+                    item_name = clean_text(item.text)
                     if item_name and len(item_name) > 2:
                         items.append({
                             'id': item_id,
@@ -328,7 +341,7 @@ def extract_menu_items_from_html(html_content, unit_id, category_name=None):
             match = re.search(r'toggleCourseItems\(this,\s*(\d+)\)', onclick)
             if match:
                 course_id = match.group(1)
-                subcategory_name = elem.text.strip()
+                subcategory_name = clean_text(elem.text)
                 subcategory_elements.append({
                     'course_id': course_id,
                     'name': subcategory_name,
@@ -412,7 +425,7 @@ def extract_menu_items_from_html(html_content, unit_id, category_name=None):
                                         item_id = match.group(1)
                             
                             if item_id and item_id not in assigned_items:
-                                item_name = elem.text.strip()
+                                item_name = clean_text(elem.text)
                                 if item_name and len(item_name) > 2:
                                     associated_items.append({
                                         "id": item_id,
@@ -480,7 +493,7 @@ def get_nutrition_info(item_id, item_name, unit_id, menu_context=None):
         
         # Get item name from nutrition label (more accurate than menu name)
         header_element = soup.select_one('.cbo_nn_LabelHeader')
-        actual_name = header_element.text.strip() if header_element else item_name
+        actual_name = clean_text(header_element.text) if header_element else clean_text(item_name)
         
         nutrition_data = {
             "item_id": item_id,
@@ -496,7 +509,11 @@ def get_nutrition_info(item_id, item_name, unit_id, menu_context=None):
             "total_carb": "",
             "dietary_fiber": "",
             "sugars": "",
+            "added_sugars": "0g",  # Default to 0g when not found
             "protein": "",
+            "calcium": "",
+            "iron": "",
+            "potassium": "",
             "ingredients": "",
             "allergens": ""
         }
@@ -504,8 +521,9 @@ def get_nutrition_info(item_id, item_name, unit_id, menu_context=None):
         # Parse serving size
         serving_divs = soup.find_all('div', class_='bold-text inline-div-right')
         for div in serving_divs:
-            if 'oz' in div.text or 'g)' in div.text:
-                nutrition_data["serving_size"] = div.text.strip()
+            div_text = clean_text(div.text)
+            if 'oz' in div_text or 'g)' in div_text:
+                nutrition_data["serving_size"] = div_text
                 break
         
         # Parse calories - special structure
@@ -513,26 +531,35 @@ def get_nutrition_info(item_id, item_name, unit_id, menu_context=None):
         if calories_section:
             calories_right = calories_section.find('div', class_='inline-div-right')
             if calories_right:
-                nutrition_data["calories"] = calories_right.text.strip()
+                nutrition_data["calories"] = clean_text(calories_right.text)
         
-        # Parse nutrition facts from bordered sub-headers
-        bordered_sections = soup.find_all('div', class_='cbo_nn_LabelBorderedSubHeader')
+        # Parse nutrition facts from both bordered and non-bordered sub-headers
+        nutrition_sections = soup.find_all('div', class_=['cbo_nn_LabelBorderedSubHeader', 'cbo_nn_LabelNoBorderSubHeader'])
         
-        for section in bordered_sections:
+        for section in nutrition_sections:
             left_div = section.find('div', class_='inline-div-left')
             if not left_div:
                 continue
             
-            # Get the nutrition label and value
+            # Check for added sugars special case (different structure)
+            if 'addedSugarRow' in left_div.get('class', []):
+                span = left_div.find('span')
+                if span:
+                    added_sugar_text = clean_text(span.text).lower()
+                    # Extract "x g" from text like "include 2 g added sugars"
+                    import re
+                    match = re.search(r'(\d+(?:\.\d+)?)\s*g', added_sugar_text)
+                    if match:
+                        nutrition_data["added_sugars"] = f"{match.group(1)}g"
+                continue
+            
+            # Get the nutrition label and value for regular nutrients
             spans = left_div.find_all('span')
             if len(spans) >= 2:
-                label = spans[0].text.strip().lower()
-                value = spans[1].text.strip()
+                label = clean_text(spans[0].text).lower()
+                value = clean_text(spans[1].text)
                 
-                # Clean the value (remove &nbsp; and extra spaces)
-                value = value.replace('\xa0', '').strip()
-                
-                # Map to our nutrition data fields
+                # Map to our nutrition data fields (case-insensitive)
                 if 'total fat' in label:
                     nutrition_data["total_fat"] = value
                 elif 'saturated fat' in label:
@@ -551,6 +578,12 @@ def get_nutrition_info(item_id, item_name, unit_id, menu_context=None):
                     nutrition_data["sugars"] = value
                 elif 'protein' in label:
                     nutrition_data["protein"] = value
+                elif 'calcium' in label:
+                    nutrition_data["calcium"] = value
+                elif 'iron' in label:
+                    nutrition_data["iron"] = value
+                elif 'potassium' in label or 'potas' in label:
+                    nutrition_data["potassium"] = value
         
         # Parse ingredients - specific structure
         ingredients_bold = soup.find('span', class_='cbo_nn_LabelIngredientsBold')
@@ -558,15 +591,15 @@ def get_nutrition_info(item_id, item_name, unit_id, menu_context=None):
             # Find the next span which contains the actual ingredients
             ingredients_span = ingredients_bold.find_next_sibling('span', class_='cbo_nn_LabelIngredients')
             if ingredients_span:
-                nutrition_data["ingredients"] = ingredients_span.text.strip()
+                nutrition_data["ingredients"] = clean_text(ingredients_span.text)
         
-        # Look for allergens - they might be in various places
-        # Check for allergen-related text in the HTML
-        allergen_text = soup.find(string=lambda x: x and 'allergen' in x.lower())
-        if allergen_text:
-            parent = allergen_text.parent
-            if parent:
-                nutrition_data["allergens"] = parent.text.strip()
+        # Parse allergens - look for the specific allergen structure
+        allergens_bold = soup.find('span', class_='cbo_nn_LabelAllergensBold')
+        if allergens_bold:
+            # Find the next span which contains the actual allergens
+            allergens_span = allergens_bold.find_next_sibling('span', class_='cbo_nn_LabelAllergens')
+            if allergens_span:
+                nutrition_data["allergens"] = clean_text(allergens_span.text)
         
         return nutrition_data
         
@@ -574,9 +607,46 @@ def get_nutrition_info(item_id, item_name, unit_id, menu_context=None):
         print(f"Error getting nutrition for item {item_id}: {e}")
         return None
 
+def save_csv_data(filename_suffix=""):
+    """Save current nutrition data to CSV"""
+    global all_nutrition_data, csv_filename, fieldnames
+    
+    if not all_nutrition_data:
+        print("No data to save")
+        return
+    
+    save_filename = csv_filename
+    if filename_suffix:
+        # Insert suffix before file extension
+        name_parts = csv_filename.rsplit('.', 1)
+        save_filename = f"{name_parts[0]}_{filename_suffix}.{name_parts[1]}"
+    
+    print(f"\nSaving {len(all_nutrition_data)} items to {save_filename}")
+    
+    with open(save_filename, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(all_nutrition_data)
+    
+    print(f"Data saved to: {save_filename}")
+
+def signal_handler(signum, frame):
+    """Handle Ctrl+C gracefully"""
+    print(f"\n\n=== Process interrupted by user (signal {signum}) ===")
+    save_csv_data("aborted")
+    print("Aborted CSV saved. You can resume scraping later or use this partial data.")
+    sys.exit(0)
+
 def scrape_all_nutrition_data():
     """Main scraping function"""
+    global all_nutrition_data, csv_filename, fieldnames
+    
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+    
     print("=== Starting Duke NetNutrition Scraper ===")
+    print("Press Ctrl+C at any time to save an 'aborted' CSV with current progress")
     start_time = datetime.now()
     
     # Setup
@@ -595,8 +665,8 @@ def scrape_all_nutrition_data():
     fieldnames = [
         "item_id", "item_name", "unit_id", "unit_name", "category", "subcategory", "serving_size", 
         "calories", "total_fat", "saturated_fat", "trans_fat", "cholesterol", 
-        "sodium", "total_carb", "dietary_fiber", "sugars", "protein", 
-        "ingredients", "allergens", "scraped_at"
+        "sodium", "total_carb", "dietary_fiber", "sugars", "added_sugars",
+        "protein", "calcium", "iron", "potassium", "ingredients", "allergens", "scraped_at"
     ]
     
     all_nutrition_data = []
@@ -641,20 +711,19 @@ def scrape_all_nutrition_data():
                 all_nutrition_data.append(nutrition_data)
                 total_items += 1
                 
-                # Print progress
+                # Print progress and save periodically
                 if total_items % 10 == 0:
                     print(f"    Progress: {total_items} items scraped so far")
+                    # Save progress every 50 items
+                    if total_items % 50 == 0:
+                        save_csv_data("progress")
+                        print(f"    Progress saved to CSV (every 50 items)")
             
             # Rate limiting - be nice to the server
             time.sleep(0.5)  # Wait 500ms between requests
     
-    # Save to CSV
-    print(f"\n=== Saving {len(all_nutrition_data)} items to {csv_filename} ===")
-    
-    with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(all_nutrition_data)
+    # Save final CSV
+    save_csv_data()
     
     end_time = datetime.now()
     duration = end_time - start_time
@@ -662,7 +731,7 @@ def scrape_all_nutrition_data():
     print(f"\n=== Scraping Complete! ===")
     print(f"Total items scraped: {len(all_nutrition_data)}")
     print(f"Time taken: {duration}")
-    print(f"Data saved to: {csv_filename}")
+    print(f"Final data saved to: {csv_filename}")
     if len(all_nutrition_data) > 0:
         print(f"Average time per item: {duration.total_seconds() / len(all_nutrition_data):.2f} seconds")
     else:
